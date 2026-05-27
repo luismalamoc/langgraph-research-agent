@@ -3,7 +3,7 @@ Cola de jobs asyncio + workers + semáforo de concurrencia.
 
 Conceptos:
 - asyncio.Queue: buffer de jobs pendientes (backpressure con maxsize).
-- asyncio.Semaphore: limita inferencias simultáneas contra vLLM.
+- asyncio.Semaphore: limita inferencias simultáneas al proveedor LLM.
 - WorkerPool: N coroutines consumen la cola y ejecutan graph.ainvoke().
 - JobStore: dict en memoria (single-threaded asyncio; sin Lock necesario).
 """
@@ -132,7 +132,7 @@ class WorkerPool:
         self.queue: asyncio.Queue[JobPayload | None] = asyncio.Queue(
             maxsize=JOB_QUEUE_SIZE
         )
-        # Semáforo: máximo de inferencias activas contra vLLM a la vez
+        # Semáforo: máximo de inferencias LLM concurrentes
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_INFERENCES)
         self._workers: list[asyncio.Task] = []
         self._shutdown = asyncio.Event()
@@ -214,7 +214,7 @@ class WorkerPool:
     async def _process_job(self, payload: JobPayload) -> None:
         self.store.update(payload.job_id, status=JobState.RUNNING)
         try:
-            # El semáforo limita cuántos jobs llaman a vLLM simultáneamente
+            # El semáforo limita cuántos jobs invocan el LLM a la vez
             async with self.semaphore:
                 result = await self._execute(payload)
             self.store.update(

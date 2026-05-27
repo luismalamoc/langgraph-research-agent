@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
         logger.info("Proveedor '%s' operativo", provider)
     else:
         logger.warning(
-            "Proveedor '%s' no responde aún — si usas ollama: bash scripts/setup_ollama.sh",
+            "Proveedor LLM '%s' no responde aún; comprueba configuración y disponibilidad",
             provider,
         )
 
@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="LangGraph Research Agent",
-    description="Agente local multi-proveedor (Ollama/OpenAI/Gemini/Anthropic), cola de jobs y HITL",
+    description="Agente de investigación con proveedor LLM configurable, cola de jobs y HITL",
     version="0.3.0",
     lifespan=lifespan,
 )

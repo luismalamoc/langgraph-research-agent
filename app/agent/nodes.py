@@ -5,8 +5,7 @@ import re
 
 from langchain_core.messages import HumanMessage
 
-from app.agent.llm import LLMNodeError as OllamaNodeError
-from app.agent.llm import get_llm as _get_llm
+from app.agent.llm import LLMNodeError, get_llm as _get_llm, llm_invocation_error_message
 from app.agent.prompts import (
     evaluator_prompt,
     planner_prompt,
@@ -24,11 +23,7 @@ def _invoke_llm(prompt: str) -> str:
         response = llm.invoke([HumanMessage(content=prompt)])
         return (response.content or "").strip()
     except Exception as exc:
-        raise OllamaNodeError(
-            "No se pudo conectar con el proveedor LLM. "
-            "¿Ollama está corriendo? Ejecuta: docker compose up -d "
-            "y luego: bash scripts/setup_ollama.sh"
-        ) from exc
+        raise LLMNodeError(llm_invocation_error_message()) from exc
 
 
 def _parse_subtopics(raw: str) -> list[str]:
@@ -64,10 +59,10 @@ def planner(state: AgentState) -> dict:
             "current_subtopic_idx": 0,
             "iteration_count": 0,
         }
-    except OllamaNodeError:
+    except LLMNodeError:
         raise
     except Exception as exc:
-        raise OllamaNodeError(f"Error en planner: {exc}") from exc
+        raise LLMNodeError(f"Error en planner: {exc}") from exc
 
 
 def researcher(state: AgentState) -> dict:
@@ -98,10 +93,10 @@ def researcher(state: AgentState) -> dict:
             iteration = 1
 
         return {"research_results": results, "iteration_count": iteration}
-    except OllamaNodeError:
+    except LLMNodeError:
         raise
     except Exception as exc:
-        raise OllamaNodeError(f"Error en researcher: {exc}") from exc
+        raise LLMNodeError(f"Error en researcher: {exc}") from exc
 
 
 def evaluator(state: AgentState) -> dict:
@@ -137,10 +132,10 @@ def evaluator(state: AgentState) -> dict:
                     updates["iteration_count"] = 0
 
         return updates
-    except OllamaNodeError:
+    except LLMNodeError:
         raise
     except Exception as exc:
-        raise OllamaNodeError(f"Error en evaluator: {exc}") from exc
+        raise LLMNodeError(f"Error en evaluator: {exc}") from exc
 
 
 def writer(state: AgentState) -> dict:
@@ -152,10 +147,10 @@ def writer(state: AgentState) -> dict:
 
         report = _invoke_llm(writer_prompt(state["topic"], results))
         return {"final_report": report}
-    except OllamaNodeError:
+    except LLMNodeError:
         raise
     except Exception as exc:
-        raise OllamaNodeError(f"Error en writer: {exc}") from exc
+        raise LLMNodeError(f"Error en writer: {exc}") from exc
 
 
 def human_review(state: AgentState) -> dict:

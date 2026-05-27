@@ -70,7 +70,7 @@ def _build_llm(provider: str) -> BaseChatModel:
 
         return ChatOllama(
             model=os.getenv("OLLAMA_MODEL", "qwen2.5:7b"),
-            base_url=os.getenv("OLLAMA_HOST", "http://ollama:11434"),
+            base_url=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
             temperature=0.7,
         )
 
@@ -108,19 +108,34 @@ def _build_llm(provider: str) -> BaseChatModel:
     )
 
 
+def provider_config_hint(provider: str | None = None) -> str:
+    """Pistas de configuración por proveedor (solo nombres de variables, sin infra)."""
+    provider = provider or get_provider()
+    hints = {
+        "ollama": "Variables: OLLAMA_HOST, OLLAMA_MODEL.",
+        "openai": "Variables: OPENAI_API_KEY, OPENAI_MODEL.",
+        "gemini": "Variables: GOOGLE_API_KEY, GEMINI_MODEL.",
+        "anthropic": "Variables: ANTHROPIC_API_KEY, ANTHROPIC_MODEL.",
+    }
+    return hints.get(provider, "")
+
+
 def provider_unavailable_detail() -> str:
     provider = get_provider()
-    if provider == "ollama":
-        host = os.getenv("OLLAMA_HOST", "http://ollama:11434")
-        model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-        return (
-            f"Ollama no está disponible en {host}. "
-            "Pasos: colima start --arch aarch64 && docker compose up -d && "
-            f"bash scripts/setup_ollama.sh (modelo: {model})"
-        )
+    hint = provider_config_hint(provider)
     return (
-        f"Proveedor '{provider}' no está listo. "
-        "Revisa API keys en .env y reinicia: docker compose restart app"
+        f"El proveedor LLM '{provider}' no está disponible. "
+        "Comprueba que el servicio esté en ejecución y la configuración del entorno. "
+        f"{hint}".strip()
+    )
+
+
+def llm_invocation_error_message() -> str:
+    """Mensaje genérico cuando falla una llamada al LLM en un nodo."""
+    hint = provider_config_hint()
+    return (
+        "No se pudo obtener respuesta del proveedor LLM configurado. "
+        f"Comprueba disponibilidad del servicio y configuración. {hint}".strip()
     )
 
 
@@ -133,7 +148,7 @@ async def check_provider_health() -> bool:
         return False
 
     if provider == "ollama":
-        host = os.getenv("OLLAMA_HOST", "http://ollama:11434").rstrip("/")
+        host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(f"{host}/api/tags")

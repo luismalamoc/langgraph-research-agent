@@ -84,7 +84,7 @@ echo "$health" | python3 -m json.tool
 llm_healthy=$(json_get "$health" "['llm_healthy']")
 if [ "$llm_healthy" != "True" ]; then
   echo ""
-  echo "⚠️  llm_healthy=false — ¿Ollama listo? bash scripts/setup_ollama.sh"
+  echo "⚠️  llm_healthy=false — ¿Ollama listo? ollama serve && bash scripts/setup_ollama.sh"
   read -r -p "Continuar de todos modos? [y/N] " ans
   case "$ans" in y|Y|yes|YES) ;; *) exit 1 ;; esac
 fi
