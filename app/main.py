@@ -1,50 +1,76 @@
-"""FastAPI entrypoint — carga .env y monta rutas del agente."""
+"""FastAPI entrypoint — lifespan con worker pool y validación de proveedor LLM."""
 
+import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 
-import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
+from app.agent.providers import (
+    check_provider_health,
+    get_llm,
+    get_provider,
+    validate_provider_config,
+)
 from app.api.routes import router
+from app.core.queue import WORKER_COUNT, cleanup_expired_jobs_loop, get_worker_pool
 
 load_dotenv()
 
 logger = logging.getLogger("langgraph-research-agent")
 logging.basicConfig(level=logging.INFO)
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Verifica Ollama al arrancar (warning si no está listo)."""
+    pool = get_worker_pool()
+    provider = get_provider()
+
+    # Validación temprana: API keys y proveedor válido
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{OLLAMA_BASE_URL.rstrip('/')}/api/tags")
-            if resp.status_code == 200:
-                logger.info("Ollama reachable at %s", OLLAMA_BASE_URL)
-            else:
-                logger.warning(
-                    "Ollama responded with %s at %s",
-                    resp.status_code,
-                    OLLAMA_BASE_URL,
-                )
+        validate_provider_config()
+        get_llm()
+        logger.info("LLM provider '%s' configurado correctamente", provider)
+    except ValueError as exc:
+        logger.error("Configuración LLM inválida: %s", exc)
+        raise
     except Exception as exc:
+        logger.error("No se pudo instanciar el LLM (%s): %s", provider, exc)
+        raise
+
+    await pool.start()
+    cleanup_task = asyncio.create_task(cleanup_expired_jobs_loop())
+    logger.info(
+        "Worker pool started (%d workers, queue max %d, provider=%s)",
+        WORKER_COUNT,
+        pool.queue.maxsize,
+        provider,
+    )
+
+    if await check_provider_health():
+        logger.info("Proveedor '%s' operativo", provider)
+    else:
         logger.warning(
-            "Ollama not reachable at %s: %s — run docker compose up and pull model",
-            OLLAMA_BASE_URL,
-            exc,
+            "Proveedor '%s' no responde aún — si usas ollama: bash scripts/setup_ollama.sh",
+            provider,
         )
+
     yield
+
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+    await pool.stop()
+    logger.info("Worker pool stopped")
 
 
 app = FastAPI(
     title="LangGraph Research Agent",
-    description="Agente local con Ollama, LangGraph checkpoints e human-in-the-loop",
-    version="0.1.0",
+    description="Agente local multi-proveedor (Ollama/OpenAI/Gemini/Anthropic), cola de jobs y HITL",
+    version="0.3.0",
     lifespan=lifespan,
 )
 

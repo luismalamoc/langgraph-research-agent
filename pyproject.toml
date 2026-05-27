@@ -1,7 +1,7 @@
 [project]
 name = "langgraph-research-agent"
 version = "0.1.0"
-description = "LangGraph Research Agent — local research agent with Ollama"
+description = "LangGraph Research Agent — multi-provider LLM research agent"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -9,6 +9,9 @@ dependencies = [
     "langchain>=1.3",
     "langchain-core>=1.4",
     "langchain-ollama>=1.1",
+    "langchain-openai>=0.3",
+    "langchain-google-genai>=2.0",
+    "langchain-anthropic>=0.3",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "httpx>=0.28",

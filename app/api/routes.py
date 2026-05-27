@@ -1,23 +1,29 @@
-"""Endpoints REST — /run (SSE), /resume, /state/{thread_id}."""
+"""Endpoints REST — fire-and-poll con cola de jobs."""
 
-import json
-import os
-from pathlib import Path
+import asyncio
 from typing import Any
 
-import httpx
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.agent.graph import get_graph
-from app.agent.nodes import OllamaNodeError, MAX_ITERATIONS_PER_SUBTOPIC
-from app.agent.state import initial_state
+from app.agent.providers import (
+    LLMNodeError,
+    check_provider_health,
+    get_provider,
+    provider_unavailable_detail,
+)
+from app.agent.nodes import MAX_ITERATIONS_PER_SUBTOPIC
+from app.core.queue import (
+    MAX_CONCURRENT_INFERENCES,
+    WORKER_COUNT,
+    JobState,
+    get_worker_pool,
+)
+from app.core.rate_limit import rate_limit_dependency
 
 router = APIRouter()
-
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-REPORTS_DIR = Path(os.getenv("REPORTS_DIR", "/tmp/reports"))
 
 
 class RunRequest(BaseModel):
@@ -34,85 +40,43 @@ def _thread_config(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
 
 
-def _ollama_unavailable_detail() -> str:
-    model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
-    return (
-        f"Ollama no está disponible en {OLLAMA_BASE_URL}. "
-        "Pasos: colima start && docker context use colima && "
-        "docker compose up -d && ./scripts/pull_model.sh "
-        f"(modelo: {model})"
-    )
+async def _require_llm() -> None:
+    if not await check_provider_health():
+        raise HTTPException(status_code=503, detail=provider_unavailable_detail())
 
 
-async def _check_ollama() -> None:
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{OLLAMA_BASE_URL.rstrip('/')}/api/tags")
-            resp.raise_for_status()
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=_ollama_unavailable_detail()) from exc
-
-
-def _serialize_update(chunk: dict[str, Any]) -> dict[str, Any]:
-    """Convierte un chunk de stream_mode=updates a JSON serializable."""
-    out: dict[str, Any] = {}
-    for node_name, update in chunk.items():
-        out[node_name] = update
-    return out
-
-
-@router.post("/run")
-async def run_agent(body: RunRequest) -> StreamingResponse:
-    """Inicia el agente y transmite cada nodo completado vía SSE."""
-    await _check_ollama()
-    graph = get_graph()
-    config = _thread_config(body.thread_id)
-    state = initial_state(body.topic)
-
-    async def event_stream():
-        try:
-            async for chunk in graph.astream(
-                state,
-                config=config,
-                stream_mode="updates",
-            ):
-                payload = {"event": "node_complete", **_serialize_update(chunk)}
-                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-            snapshot = graph.get_state(config)
-            values = snapshot.values if snapshot else {}
-            next_nodes = list(snapshot.next) if snapshot and snapshot.next else []
-
-            if "human_review" in next_nodes:
-                interrupt_payload = {
-                    "event": "interrupt",
-                    "next": next_nodes,
-                    "final_report": values.get("final_report", ""),
-                    "message": "Revisa el reporte y llama POST /resume con approved=true|false",
-                }
-                yield f"data: {json.dumps(interrupt_payload, ensure_ascii=False)}\n\n"
-
-            yield "data: [DONE]\n\n"
-        except OllamaNodeError as exc:
-            err = {"event": "error", "detail": str(exc)}
-            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
+def _accepted_response(job_id: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=202,
+        content={
+            "job_id": job_id,
+            "status": JobState.QUEUED.value,
+            "poll_url": f"/jobs/{job_id}",
         },
     )
 
 
-@router.post("/resume")
-async def resume_agent(body: ResumeRequest) -> dict:
-    """Reanuda tras interrupt_before human_review."""
-    await _check_ollama()
+@router.post("/run", dependencies=[Depends(rate_limit_dependency)])
+async def run_agent(body: RunRequest) -> JSONResponse:
+    """Encola ejecución del agente — patrón fire-and-poll (202 Accepted)."""
+    await _require_llm()
+    pool = get_worker_pool()
+
+    try:
+        job = pool.enqueue_run(body.thread_id, body.topic)
+    except asyncio.QueueFull:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Job queue full (max {pool.queue.maxsize} waiting jobs)",
+        ) from None
+
+    return _accepted_response(job.id)
+
+
+@router.post("/resume", dependencies=[Depends(rate_limit_dependency)])
+async def resume_agent(body: ResumeRequest) -> JSONResponse:
+    """Encola reanudación tras human-in-the-loop."""
+    await _require_llm()
     graph = get_graph()
     config = _thread_config(body.thread_id)
 
@@ -130,32 +94,31 @@ async def resume_agent(body: ResumeRequest) -> dict:
             detail=f"El grafo no está pausado en human_review. next={next_nodes}",
         )
 
-    graph.update_state(config, {"human_approved": body.approved})
-
+    pool = get_worker_pool()
     try:
-        graph.invoke(None, config)
-    except OllamaNodeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        job = pool.enqueue_resume(body.thread_id, body.approved)
+    except asyncio.QueueFull:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Job queue full (max {pool.queue.maxsize} waiting jobs)",
+        ) from None
 
-    saved_path = ""
-    if body.approved:
-        final = graph.get_state(config).values.get("final_report", "")
-        if final:
-            REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-            path = REPORTS_DIR / f"{body.thread_id}.md"
-            path.write_text(final, encoding="utf-8")
-            saved_path = str(path)
+    return _accepted_response(job.id)
 
-    return {
-        "status": "completed",
-        "human_approved": body.approved,
-        "saved_path": saved_path,
-    }
+
+@router.get("/jobs/{job_id}")
+async def get_job(job_id: str) -> dict[str, Any]:
+    """Polling del resultado de un job."""
+    pool = get_worker_pool()
+    job = pool.store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return job.to_dict()
 
 
 @router.get("/state/{thread_id}")
 async def get_state(thread_id: str) -> dict:
-    """Devuelve el estado del checkpoint para un thread_id."""
+    """Estado del checkpoint LangGraph (human-in-the-loop)."""
     graph = get_graph()
     config = _thread_config(thread_id)
     snapshot = graph.get_state(config)
@@ -175,18 +138,19 @@ async def get_state(thread_id: str) -> dict:
 
 
 @router.get("/health")
-async def health() -> dict:
-    """Health check incluyendo disponibilidad de Ollama."""
-    ollama_ok = False
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(f"{OLLAMA_BASE_URL.rstrip('/')}/api/tags")
-            ollama_ok = resp.status_code == 200
-    except Exception:
-        pass
+async def health() -> dict[str, Any]:
+    """Salud del sistema: cola, workers y proveedor LLM activo."""
+    pool = get_worker_pool()
+    llm_ok = await check_provider_health()
     return {
-        "status": "ok" if ollama_ok else "degraded",
-        "ollama_url": OLLAMA_BASE_URL,
-        "ollama_reachable": ollama_ok,
+        "status": "ok" if llm_ok else "degraded",
+        "llm_provider": get_provider(),
+        "llm_healthy": llm_ok,
+        "queue_size": pool.queue_size,
+        "queue_capacity": pool.queue.maxsize,
+        "active_workers": WORKER_COUNT if pool.is_running else 0,
+        "jobs_in_store": len(pool.store),
+        "max_concurrent_inferences": MAX_CONCURRENT_INFERENCES,
+        "semaphore_available_slots": pool.semaphore_available_slots,
         "max_iterations_per_subtopic": MAX_ITERATIONS_PER_SUBTOPIC,
     }

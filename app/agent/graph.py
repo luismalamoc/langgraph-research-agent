@@ -5,6 +5,9 @@ from typing import Literal
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+# LLM multi-proveedor: ollama | openai | gemini | anthropic (app.agent.providers)
+from app.agent.providers import get_llm  # noqa: F401
+
 from app.agent.nodes import (
     evaluator,
     human_review,

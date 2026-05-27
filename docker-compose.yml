@@ -1,23 +1,25 @@
 services:
   ollama:
     image: ollama/ollama:latest
+    platform: linux/arm64
     container_name: langgraph-research-ollama
     restart: unless-stopped
     ports:
       - "11434:11434"
     volumes:
-      - ollama_data:/root/.ollama
+      - ollama-models:/root/.ollama
     environment:
       - OLLAMA_HOST=0.0.0.0:11434
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 30s
+      retries: 12
+      start_period: 20s
 
   app:
     build: .
+    platform: linux/arm64
     container_name: langgraph-research-app
     restart: unless-stopped
     ports:
@@ -25,7 +27,8 @@ services:
     env_file:
       - .env
     environment:
-      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_HOST=http://ollama:11434
+      - LLM_PROVIDER=ollama
     volumes:
       - ./app:/app/app:ro
       - reports_data:/tmp/reports
@@ -34,5 +37,5 @@ services:
         condition: service_healthy
 
 volumes:
-  ollama_data:
+  ollama-models:
   reports_data:

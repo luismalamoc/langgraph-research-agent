@@ -1,12 +1,12 @@
 """Nodos del StateGraph — cada función recibe state y retorna un dict parcial."""
 
 import json
-import os
 import re
 
 from langchain_core.messages import HumanMessage
-from langchain_ollama import ChatOllama
 
+from app.agent.llm import LLMNodeError as OllamaNodeError
+from app.agent.llm import get_llm as _get_llm
 from app.agent.prompts import (
     evaluator_prompt,
     planner_prompt,
@@ -18,20 +18,6 @@ from app.agent.state import AgentState
 MAX_ITERATIONS_PER_SUBTOPIC = 3
 
 
-class OllamaNodeError(Exception):
-    """Error al llamar a Ollama desde un nodo."""
-
-    pass
-
-
-def _get_llm() -> ChatOllama:
-    return ChatOllama(
-        model=os.getenv("OLLAMA_MODEL", "qwen2.5:7b"),
-        base_url=os.getenv("OLLAMA_BASE_URL", "http://ollama:11434"),
-        temperature=0.3,
-    )
-
-
 def _invoke_llm(prompt: str) -> str:
     try:
         llm = _get_llm()
@@ -39,9 +25,9 @@ def _invoke_llm(prompt: str) -> str:
         return (response.content or "").strip()
     except Exception as exc:
         raise OllamaNodeError(
-            "No se pudo conectar con Ollama. "
-            "¿Está corriendo? Ejecuta: colima start && docker compose up -d "
-            "y luego: ./scripts/pull_model.sh"
+            "No se pudo conectar con el proveedor LLM. "
+            "¿Ollama está corriendo? Ejecuta: docker compose up -d "
+            "y luego: bash scripts/setup_ollama.sh"
         ) from exc
 
 

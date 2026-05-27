@@ -1,141 +1,138 @@
 # LangGraph Research Agent
 
-Agente de research **100% local** con [LangGraph](https://github.com/langchain-ai/langgraph), [Ollama](https://ollama.com) y FastAPI. Aprende: `StateGraph`, nodos, edges condicionales, `MemorySaver`, `interrupt_before` y human-in-the-loop.
+Agente de research con [LangGraph](https://github.com/langchain-ai/langgraph) y FastAPI. Soporta **Ollama** (local, ARM64/Colima), **OpenAI**, **Gemini** y **Anthropic** vía `LLM_PROVIDER`.
+
+Incluye cola de jobs (fire-and-poll), semáforo de concurrencia, `MemorySaver`, `interrupt_before` y human-in-the-loop.
 
 ## Requisitos
 
-- **Colima** + Docker CLI (`colima start`, contexto `colima`)
-- **uv** ([instalación](https://docs.astral.sh/uv/))
-- **Python 3.14+**
-- ~8 GB RAM libre para `qwen2.5:7b` (alternativas: `phi3:mini`, `llama3.1:8b`)
+- **Colima** con ARM: `colima start --arch aarch64 --memory 12 --cpu 6`
+- **uv** + **Python 3.14+**
+- RAM según modelo Ollama (ver `.env.example`)
 
-Dependencias resueltas en `uv.lock` (compatibles con Python 3.14), p. ej. `langgraph 1.2`, `fastapi 0.136.1`, `uvicorn 0.47`.
-
-## Inicio rápido
+## Inicio rápido (M4 Mac + Colima + Ollama)
 
 ```bash
 cd /Users/lalamo/projects/langgraph-research-agent
 
-# 1. Colima + Docker
-colima start
+colima start --arch aarch64 --memory 12 --cpu 6
 docker context use colima
 
-# 2. Variables de entorno y dependencias (uv, no pip)
 cp .env.example .env
 uv sync
 
-# 3. Levantar Ollama + API
 docker compose up -d --build
+bash scripts/setup_ollama.sh
 
-# 4. Descargar modelo (primera vez, ~4.7 GB)
-./scripts/pull_model.sh
-
-# 5. Probar el agente (SSE)
-curl -N -X POST http://localhost:8000/run \
-  -H "Content-Type: application/json" \
-  -d '{"topic": "LangGraph checkpoints", "thread_id": "test-1"}'
-
-# 6. Aprobar el reporte (human-in-the-loop)
-curl -X POST http://localhost:8000/resume \
-  -H "Content-Type: application/json" \
-  -d '{"thread_id": "test-1", "approved": true}'
-
-# 7. Ver estado del checkpoint
-curl http://localhost:8000/state/test-1
+curl -s http://localhost:8000/health | python3 -m json.tool
 ```
 
-## Desarrollo local (sin Docker para la app)
-
-Con Ollama ya expuesto en `localhost:11434` (p. ej. solo el servicio `ollama` de compose):
+## Flujo completo (script de ejemplo)
 
 ```bash
-export OLLAMA_BASE_URL=http://localhost:11434
-uv run uvicorn app.main:app --reload --port 8000
+# Requiere API levantada (docker compose up -d + setup_ollama.sh)
+bash scripts/run_full_flow.sh
+
+# Personalizar
+TOPIC="vLLM vs Ollama" THREAD_ID=test-42 APPROVED=true bash scripts/run_full_flow.sh
 ```
+
+El script ejecuta: `/health` → `/run` → poll job → `/state` → `/resume` → poll → estado final.
+
+## Probar (fire-and-poll manual)
+
+```bash
+JOB=$(curl -s -X POST http://localhost:8000/run \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "LangGraph checkpoints", "thread_id": "test-1"}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
+
+curl -s "http://localhost:8000/jobs/$JOB" | python3 -m json.tool
+```
+
+## Cambiar de proveedor (sin tocar código)
+
+Solo reinicia el servicio `app`:
+
+```bash
+# OpenAI
+# En .env: LLM_PROVIDER=openai, OPENAI_API_KEY=sk-...
+docker compose restart app
+
+# Gemini
+# LLM_PROVIDER=gemini, GOOGLE_API_KEY=...
+
+# Anthropic
+# LLM_PROVIDER=anthropic, ANTHROPIC_API_KEY=...
+
+# Volver a local
+# LLM_PROVIDER=ollama
+docker compose restart app
+```
+
+Ollama puede seguir corriendo aunque uses un proveedor cloud.
+
+## Ollama nativo + Metal (M4, ~5x más rápido)
+
+Colima no expone el GPU Apple al contenedor. Para usar Metal:
+
+```bash
+brew install ollama
+ollama serve &
+ollama pull qwen2.5:7b
+
+# En .env:
+OLLAMA_HOST=http://host.docker.internal:11434
+```
+
+Opcional: quita el servicio `ollama` de `docker-compose.yml` si solo usas el nativo.
 
 ## Endpoints
 
 | Método | Ruta | Descripción |
 |--------|------|-------------|
-| `POST` | `/run` | Inicia el agente; responde SSE por nodo |
-| `POST` | `/resume` | Reanuda tras pausa en `human_review` |
-| `GET` | `/state/{thread_id}` | Estado del checkpoint |
-| `GET` | `/health` | Salud de la API y Ollama |
+| `POST` | `/run` | Encola agente → `202` + `job_id` |
+| `GET` | `/jobs/{job_id}` | Poll resultado |
+| `POST` | `/resume` | HITL → `202` + `job_id` |
+| `GET` | `/state/{thread_id}` | Checkpoint LangGraph |
+| `GET` | `/health` | Cola + `llm_provider` + `llm_healthy` |
 
-## Flujo del grafo
+## Proveedores LLM
 
-```
-START → planner → researcher → evaluator
-                      ↑              |
-                      |   (retry)    ↓
-                      └──── [¿suficiente?]
-                                     |
-                               (todos OK)
-                                     ↓
-                                  writer
-                                     ↓
-                         [interrupt_before: human_review]
-                                     ↓
-                              human_review → END
-```
+| `LLM_PROVIDER` | Cliente | Variables |
+|----------------|---------|-----------|
+| `ollama` (default) | `ChatOllama` | `OLLAMA_HOST`, `OLLAMA_MODEL` |
+| `openai` | `ChatOpenAI` | `OPENAI_API_KEY`, `OPENAI_MODEL` |
+| `gemini` | `ChatGoogleGenerativeAI` | `GOOGLE_API_KEY`, `GEMINI_MODEL` |
+| `anthropic` | `ChatAnthropic` | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` |
 
-## Conceptos LangGraph en este código
+Factory: [`app/agent/providers.py`](app/agent/providers.py)
 
-### StateGraph y TypedDict
+## Modelos Ollama (M4 48GB)
 
-El estado es un `TypedDict` (`app/agent/state.py`). LangGraph valida y mergea actualizaciones parciales entre nodos.
-
-### Nodos
-
-Cada nodo es una función `(state) -> dict` que **solo retorna los campos que cambian** (`app/agent/nodes.py`).
-
-### Edge normal vs condicional
-
-- **Normal:** `planner → researcher` (siempre).
-- **Condicional:** `evaluator → researcher | writer` según `route_after_evaluator` (`app/agent/graph.py`).
-
-### MemorySaver y `thread_id`
-
-`MemorySaver` guarda snapshots en RAM. El `thread_id` en `config={"configurable": {"thread_id": "..."}}` aísla conversaciones.
-
-En producción usarías `SqliteSaver` o `PostgresSaver` (`langgraph-checkpoint-sqlite` / `langgraph-checkpoint-postgres`).
-
-### `interrupt_before`
-
-Al compilar con `interrupt_before=["human_review"]`, el grafo **se detiene antes** de ejecutar ese nodo. El estado queda en checkpoint; el cliente revisa `final_report` y llama `/resume`.
-
-### Reanudar con `invoke(None, config)`
-
-Tras `update_state` con `human_approved`, `graph.invoke(None, config)` continúa desde el breakpoint sin reenviar el input inicial.
-
-## macOS + Colima
-
-- No hay GPU en la VM de Colima → inferencia en **CPU** (más lenta).
-- Los modelos persisten en el volumen Docker `ollama_data`.
-- Si la app en Docker debe hablar con Ollama en el host: `OLLAMA_BASE_URL=http://host.docker.internal:11434`.
+| Modelo | RAM aprox. |
+|--------|------------|
+| `phi3:mini` | ~2.3 GB |
+| `qwen2.5:7b` | ~4.7 GB (default) |
+| `qwen2.5:14b` | ~9 GB |
+| `qwen2.5:32b` | ~20 GB |
 
 ## Estructura
 
 ```
-langgraph-research-agent/
-├── app/
-│   ├── main.py
-│   ├── agent/          # StateGraph, nodos, prompts
-│   └── api/            # /run, /resume, /state
-├── scripts/pull_model.sh
-├── docker-compose.yml
-├── Dockerfile          # uv sync
-├── pyproject.toml
-└── uv.lock
+app/agent/providers.py   # factory multi-proveedor
+app/core/queue.py        # cola + semáforo + workers
+app/api/routes.py        # REST fire-and-poll
 ```
 
-## Cambiar modelo
+Ver [AGENTS.md](AGENTS.md) para guía de agentes de código.
 
-En `.env`:
+## Simular carga
 
 ```bash
-OLLAMA_MODEL=phi3:mini   # más ligero
-# OLLAMA_MODEL=llama3.1:8b
+brew install hey
+hey -n 200 -c 50 -m POST \
+  -H "Content-Type: application/json" \
+  -d '{"topic": "test", "thread_id": "load-"}' \
+  http://localhost:8000/run
 ```
-
-Luego: `./scripts/pull_model.sh`
